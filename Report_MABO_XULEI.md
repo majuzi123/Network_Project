@@ -11,7 +11,7 @@ Detecting anomalous behavior in network traffic has become increasingly critical
 
 This project proposes using graphlets—small subgraph structures representing each host's communication patterns—as behavioral fingerprints. The key insight is that a host's communication topology reveals much about its role and behavior: a DNS server naturally contacts many different IPs, while a scanning attacker exhibits a characteristic "star-like" pattern of ports. We use random walk kernels to extract features from these graphlets and train an SVM classifier to distinguish between normal and anomalous hosts.
 
-Our contribution includes implementing and comparing three different approaches: standard random walk with explicit feature mapping, the kernel trick for efficiency, and a novel non-tottering random walk variant that improves both speed and feature quality. The results demonstrate that this graphlet-based approach can achieve 92.86% accuracy with minimal computational overhead, making it practical for real-world deployment.
+Our contribution includes implementing and comparing three different approaches: standard random walk with explicit feature mapping, the kernel trick for efficiency, and a non-tottering (non-oscillating) random walk variant intended to reduce redundant walks. The experiments in this repository produced mixed results: while overall accuracy (measured on some splits) appears high (~94%), the classifier failed to detect the anomalous class in the main experimental run (zero true positives), exposing issues caused by severe class imbalance, sparse high-dimensional features, and some data-splitting edge cases. The updated report below corrects earlier optimistic summaries and documents the actual run behavior and suggested fixes.
 
 ## 2. Methodology
 
@@ -64,248 +64,120 @@ In real network data, anomalous hosts are rare—only 6% in our labeled dataset.
 
 ### 3.1 Dataset Characteristics
 
-Our labeled dataset contains network flows from 1001 source IP addresses. The class distribution is typical for network security datasets: 941 normal hosts (94%) and 60 anomalous hosts (6%). The imbalance reflects real-world conditions where attacks are indeed rare. Flow distribution per host is highly skewed: some hosts generate only a few flows, while others (particularly DNS servers and file servers) generate hundreds. This variability in graphlet size and complexity is important—our method must handle both sparse and dense communication patterns.
+- Labeled data file: `../data/annotated-trace.csv` (10070 flow records loaded).
+- Unlabeled data file: `../data/not-annotated-trace.csv` (10070 flow records loaded).
+- Source hosts: ~1001 hosts (the run shows a small mismatch in graphlet counts: 1001 vs 1002 in different stages).
+- Label distribution (host-level, after mapping by the strict strategy used in the run): 941 normal hosts (≈94.0%) and 60 anomalous hosts (≈6.0%).
 
-### 3.2 Classification Performance Comparison
+### 3.2 Feature Extraction
 
-#### Method 1: Direct Mapping with Standard Random Walk
+- Direct mapping (standard random walk): 1001 graphlets produced a feature matrix of dimension 4654. Feature extraction time reported ~10.99s.
+- Kernel method: precomputed random walk features and pairwise kernel produced a 1001×1001 kernel matrix (reported range [0.00, 5.00]) in ~12.54s.
+- Non-tottering (non-oscillating) random walk: feature dimension reported ~4702 with extraction time ~8.45s. The non-tottering variant reduced redundant walks but the run produced very few anomaly samples for the following split step (see below).
 
-**Performance Metrics (Test Set):**
-- **Accuracy:** 0.8571 (85.71%)
-- **Precision:** 0.6667 (66.67%)
-- **Recall:** 0.6667 (66.67%)
-- **F1-Score:** 0.6667
+### 3.3 Train / Test Splits
 
-**Confusion Matrix:**
-```
-Predictions:     Predicted Normal    Predicted Anomaly
-Actually Normal:        49                   3
-Actually Anomaly:        2                   4
-```
+- Direct mapping (standard): stratified split succeeded (after attempts) with a training set of 700 samples (Normal=658, Anomaly=42) and a test set of 301 samples (Normal=283, Anomaly=18).
+- Kernel method: used the same stratified logic; training/test counts matched the direct method (700 train, 301 test) after kernel matrix splitting.
+- Non-tottering: due to extremely skewed per-class counts after feature processing, only 1 anomalous sample remained available for splitting. The code fell back to a manual split that placed the single anomaly in the training set, leaving a test set with only normal samples (300 normals, 0 anomalies). This makes standard test metrics for the anomaly class (precision/recall/F1) undefined or meaningless.
 
-**Interpretation:**
-- True Negative (TN): 49 - Normal hosts correctly identified as normal
-- False Positive (FP): 3 - Normal hosts incorrectly flagged as anomalous (false alarms)
-- False Negative (FN): 2 - Anomalous hosts missed by the system
-- True Positive (TP): 4 - Anomalous hosts correctly detected
-- **Anomaly Detection Rate:** 66.67% (4 out of 6 anomalies detected)
+### 3.4 Classifier Performance
 
-**Computation Time:**
-- Feature extraction: ~0.15 seconds
-- SVM training: ~0.08 seconds
-- **Total time: ~0.23 seconds**
+Key results from the run (direct mapping and kernel trick produce the same detection outcomes on the test set):
 
-#### Method 2: Kernel Trick with Standard Random Walk
+- SVM (Direct mapping, linear, class_weight='balanced')
+  - Training time: ~4.52s
+  - Training accuracy: 1.0000 (likely overfit on high-dimensional sparse features)
+  - Test accuracy: 0.9402
+  - Precision (anomaly class): 0.0000
+  - Recall (anomaly class): 0.0000
+  - F1-score (anomaly class): 0.0000
+  - ROC-AUC: 0.5000
+  - Confusion matrix (test): [[TN=283, FP=0], [FN=18, TP=0]] — i.e., all test anomalies were missed.
 
-**Performance Metrics (Test Set):**
-- **Accuracy:** 0.9286 (92.86%)
-- **Precision:** 0.8000 (80.00%)
-- **Recall:** 0.8000 (80.00%)
-- **F1-Score:** 0.8000
+- SVM (Kernel trick, precomputed kernel)
+  - Kernel computation time: ~12.54s (matrix shape (1001,1001))
+  - SVM training time: ~0.01s
+  - Test accuracy and confusion matrix identical to direct mapping: no anomalies detected (TP=0, FN>0).
 
-**Confusion Matrix:**
-```
-Predictions:     Predicted Normal    Predicted Anomaly
-Actually Normal:        52                   0
-Actually Anomaly:        1                   5
-```
+- SVM (Non-tottering run)
+  - Feature extraction: ~8.45s; training time: ~2.04s
+  - Because the test set contained only normal samples in this run, reported test accuracy = 1.0000 but this is not informative: precision/recall/F1 for the anomaly class are 0.0 or undefined because the test set lacks positive examples.
 
-**Interpretation:**
-- True Negative (TN): 52 - Excellent normal host identification
-- False Positive (FP): 0 - **No false alarms!**
-- False Negative (FN): 1 - Only 1 anomaly missed
-- True Positive (TP): 5 - 5 anomalies correctly detected
-- **Anomaly Detection Rate:** 83.33% (5 out of 6 anomalies detected)
+**Important observation:** In the main run, although accuracy is high (~94%), the classifier entirely failed to detect anomalies on the test set (zero true positives). This indicates the model learned to predict the majority class (normal) for all test samples — a classic symptom when class imbalance and/or feature issues dominate learning.
 
-**Computation Time:**
-- Kernel matrix computation: ~2.45 seconds
-- SVM training: ~0.12 seconds
-- **Total time: ~2.57 seconds**
+### 3.5 Detection on Unlabeled Data
 
-#### Method 3: Direct Mapping with Non-Tottering Random Walk
+- The run reported `Number of unlabeled hosts: 1` (only a single unlabeled host was processed in this execution).
+- Predictions (direct mapping): 0 hosts detected as malicious; 1 host detected as normal.
+- Average decision function score reported: -0.8800 (negative scores indicate prediction toward the normal class in this setup).
 
-**Performance Metrics (Test Set):**
-- **Accuracy:** 0.9286 (92.86%)
-- **Precision:** 0.8333 (83.33%)
-- **Recall:** 0.8333 (83.33%)
-- **F1-Score:** 0.8333
+### 3.6 Summary Table
 
-**Confusion Matrix:**
-```
-Predictions:     Predicted Normal    Predicted Anomaly
-Actually Normal:        49                   3
-Actually Anomaly:        1                   5
-```
+The run produced a comparison table of times and metrics. Important caveats:
+- Reported accuracies: Direct mapping and Kernel trick both show test accuracy 0.9402 (but both have zero anomaly detection on the test split used).
+- Non-tottering run reported test accuracy 1.0000 because the test set contained no anomalies — this is misleading for anomaly detection performance.
 
-**Interpretation:**
-- True Negative (TN): 49
-- False Positive (FP): 3
-- False Negative (FN): 1
-- True Positive (TP): 5
-- **Anomaly Detection Rate:** 83.33%
-
-**Computation Time:**
-- Feature extraction: ~0.18 seconds
-- SVM training: ~0.07 seconds
-- **Total time: ~0.25 seconds**
-
-### 3.3 Method Comparison and Analysis
-
-![Computation Time Comparison](./output/1.png)
-*Figure 1: Computation time comparison across all three methods. The kernel trick requires significantly more time due to O(n²) kernel matrix computation, but yields better accuracy.*
-
-![Performance Metrics Comparison](./output/2.png)
-*Figure 2: Detailed performance metrics comparison. The kernel trick method achieves the best balance of precision and recall with zero false positives in this test set.*
-
-![Classification Confusion Matrices](./output/3.png)
-*Figure 3: Confusion matrices for both direct mapping and kernel trick methods, showing the distribution of TP, TN, FP, and FN.*
-
-**Analysis and Trade-offs:**
-
-The three methods show distinct characteristics worth examining in detail:
-
-*Standard Direct Mapping* achieves 85.71% accuracy in 0.23 seconds, making it the fastest approach. However, the lower recall (66.67%) means it misses one-third of anomalies—concerning for security applications where missed attacks are costly.
-
-*Kernel Trick* improves to 92.86% accuracy with 83.33% detection rate and remarkably, zero false positives on our test set. The cost is computational: 2.57 seconds total time, mostly spent computing the O(n²) kernel matrix. For a 1000-host network, this is manageable, but would become problematic at scale.
-
-*Non-Tottering Random Walk* achieves 92.86% accuracy in just 0.25 seconds—essentially the same accuracy as the kernel trick but 10x faster. This makes it the most practical for operational deployment. The approach works better because prohibiting immediate backtracking in walks removes redundant information, creating more concise and meaningful features.
-
-### 3.4 Anomaly Detection on Unlabeled Trace
-
-The trained model was applied to the unlabeled network traffic trace to discover previously unknown anomalies.
-
-![Detection Results Distribution](./output/4.png)
-*Figure 4: Distribution of normal vs. anomalous hosts detected in the unlabeled trace. The model identified suspicious behavior in a small percentage of hosts.*
-
-
-**Top Anomalous Hosts (by confidence score):**
-The SVM decision function provides confidence scores for each prediction. Hosts with the highest confidence scores are most likely to be malicious.
-
-### 3.5 Attack Type Analysis
-
-Based on the detected anomalies, traffic feature analysis revealed multiple attack patterns:
-
-![Anomaly Traffic Analysis](./output/5.png)
-*Figure 5: Detailed analysis of anomalous traffic patterns, including protocol distribution and port scanning behavior.*
-
-**Identified Attack Characteristics:**
-
-1. **Port Scanning Behavior:**
-   - Large number of unique destination ports (>20% of flows)
-   - Single or few destination IPs with connections to many ports
-   - Characteristic "star-like" graphlet structure
-   - Indicates reconnaissance or vulnerability scanning activities
-
-2. **Protocol-Based Anomalies:**
-   - Unusual protocol combinations (e.g., ICMP for data exfiltration)
-   - High proportion of UDP traffic (possible DDoS amplification)
-   - Protocol switching patterns suggesting automated attacks
-
-3. **Destination Port Patterns:**
-   - Targeting of common service ports (80, 443, 22, etc.)
-   - Scanning of unusual port ranges
-   - Sequential port probing patterns
+(See Notes below for interpretation and recommended fixes.)
 
 ---
 
 ## 4. Discussion
 
-### 4.1 Why Graph Structure Matters for Anomaly Detection
+### 4.1 What went wrong in the observed run
 
-Many security tools rely on aggregate statistics: total traffic volume, number of flows, unique ports contacted. These metrics are easy to compute but miss important structural information. Our graphlet approach works differently.
+1. Severe class imbalance (≈6% anomalies) combined with very high-dimensional, sparse features made the classifier biased toward the normal class. Despite using `class_weight='balanced'`, the model still predicted all test samples as normal in this execution.
+2. The non-tottering pipeline produced a pathological split: only a single anomaly remained, and it was placed in training, leaving a single-class test set. Metrics computed on that test set (accuracy = 1.0) are not meaningful for anomaly detection.
+3. Feature sparsity and dimensionality (4k+ dimensions) increase the chance of overfitting and can make margin-based classifiers behave poorly on rare classes.
+4. There are some inconsistencies in intermediate counts (e.g., small graphlet count mismatch 1001 vs 1002 in different steps) that should be investigated to ensure graph construction and host-label mapping are consistent across pipelines.
 
-Consider two scenarios: Host A contacts 100 unique destination ports on a single server (port scanning), while Host B contacts 100 different ports spread across 100 different servers (potentially normal). Both have identical flow counts, but their graphlet structures are completely different—one is star-like (many ports to one IP), the other is varied. More subtly, the random walks through these graphs differ significantly: the scanner produces many walks of the form "src→IP→TCP→ports", while the normal host produces more diverse walks.
+### 4.2 Practical implications of the results
 
-This structural signature captures not just what a host communicates, but how—the patterns and topology of its communication. Sophisticated attacks that use moderate traffic volumes but unusual patterns (e.g., slow port scanning spread over hours) can be detected this way, whereas flow-count alone would miss them.
+- High accuracy as a scalar metric is misleading here. The model optimized for overall accuracy — which largely reflects the majority (normal) class — while failing to detect the minority (anomalous) class entirely on the test split used.
+- For anomaly detection, recall (true positive rate for the anomaly class) and PR-AUC are more meaningful. In the observed run, recall = 0.0 and PR-AUC is near chance, indicating the model did not generalize to detect anomalies.
 
-### 4.2 Non-Tottering Walks: A Simple But Effective Improvement
+### 4.3 Root causes and diagnostic checklist
 
-During implementation, we noticed an issue: standard random walks frequently oscillate between adjacent nodes (A→B→A→B→...). In our graph representation, this happens when a host contacts the same destination IP multiple times with different ports—the walk bounces between the destination IP node and protocol nodes, generating many near-identical walks.
+- Verify that host-level labels were computed identically for all methods (direct / kernel / non-tottering) and that no label-shift occurred between feature extraction and splitting.
+- Inspect per-host flow counts and feature sparsity. Remove zero-variance features and consider dimensionality reduction (TruncatedSVD) or feature hashing to reduce noise.
+- Use resampling techniques (SMOTE, random oversampling of anomaly hosts) or more aggressive class weighting and threshold calibration.
+- Re-run stratified cross-validation (StratifiedKFold) to avoid brittle single-run splits and to obtain stable estimates of recall/precision.
 
-These redundant walks inflate feature dimensions without adding information. Consider a host that contacts one server 50 times: we'd see many walks of the form "src→IP→protocol→port1", "src→IP→protocol→port2", etc. But most of these are variations on the same underlying structure.
+### 4.4 Recommendations (actionable)
 
-Non-tottering walks fix this by prohibiting immediate backtracking: once we arrive at a node from a predecessor, we cannot immediately return to that predecessor. This prevents oscillation and creates more meaningful walks that reflect actual graph structure. The result: features are more concise (15-20% fewer dimensions), training is faster, and—remarkably—classification accuracy improves rather than degrades. This suggests the cleaner features reduce noise.
-
-### 4.3 False Positives and False Negatives Analysis
-
-**False Positives (FP = 3):**
-
-We incorrectly flagged three normal hosts as anomalous. Examination reveals why: these were likely legitimate infrastructure hosts with naturally divergent communication patterns. A DNS server, for instance, must contact many different IPs (its upstream resolvers, internal servers), creating a high-diversity graphlet. A monitoring/backup system similarly contacts many servers for diagnostics or data collection. Our strict labeling strategy (any unusual traffic = anomaly) works well for real attacks but occasionally conflates legitimate infrastructure diversity with malicious behavior.
-
-False positives are operationally costly—security teams waste time investigating innocent hosts—but less critical than missed attacks.
-
-**False Negatives (FN = 1):**
-
-We missed one anomalous host, classifying it as normal. This is more concerning. The most likely explanation is a low-volume, stealthy attack: an attacker deliberately limiting their activity to avoid detection, using only a few connections that happen to match normal patterns. Another possibility is an insider threat using legitimate protocols and patterns for exfiltration—behaviorally indistinguishable from normal activity in a short observation window.
-
-Detecting such attacks would require temporal features (activity over time), protocol-level analysis, or behavioral baselines—extensions beyond the scope of this work.
-
-### 4.4 Recommendations for Improvement
-
-1. **Feature Engineering:**
-   - Add temporal features (connection patterns over time)
-   - Include statistical features (min/max/avg flow sizes)
-   - Incorporate protocol-specific behavioral patterns
-   - Weight recent activities more heavily than historical ones
-
-2. **Model Optimization:**
-   - Use ensemble methods combining multiple kernels
-   - Implement active learning to label uncertain predictions
-   - Adjust SVM hyperparameters based on cost of errors
-   - Consider anomaly detection techniques (One-Class SVM) for truly new attacks
-
-3. **Operational Integration:**
-   - Implement with lower threshold for detection to catch more attacks (reduce FN)
-   - Combine with whitelist/blacklist to reduce false alarms (reduce FP)
-   - Correlate alerts with other security systems
-   - Periodically retrain with new labeled data as threats evolve
-
-4. **Handling Class Imbalance:**
-   - Consider oversampling anomalous hosts or undersampling normal hosts
-   - Use cost-sensitive learning to penalize errors appropriately
-   - Evaluate using metrics robust to imbalance (F1-score, ROC-AUC, PR-AUC)
+1. Fix data-splitting and label consistency issues: ensure the same `host_label_map` and host order are used across feature extraction, kernel computation, and train/test splitting.
+2. Replace single-run evaluation with stratified k-fold cross-validation (report mean ± std of recall and precision) to avoid misleading single-split results.
+3. Apply imbalance remedies before model selection:
+   - Oversample anomalies (SMOTE or simple resampling), or undersample major class.
+   - Use anomaly-detection algorithms (IsolationForest, OneClassSVM) as an additional baseline.
+4. Reduce dimensionality (TruncatedSVD on sparse feature matrix) to improve model generalization and reduce overfitting.
+5. Evaluate with PR-AUC and recall-at-K, and tune decision thresholds to prioritize recall if catching anomalies is most important.
+6. Re-run unlabeled-host detection with the corrected pipeline; the current run only processed 1 unlabeled host, which is insufficient for practical assessment.
 
 ---
 
 ## 5. Key Insights and Conclusions
 
-### 5.1 Graphlet-Based vs. Traditional Approaches
+- The raw experimental run shows that a high scalar accuracy (~94%) can coexist with total failure to detect anomalies (TP=0). Accuracy alone is insufficient for imbalanced anomaly detection.
+- The kernel-trick and direct mapping implementations produced the same outcome (no detected anomalies) on the test split used; this indicates the problem is upstream (labels, sampling, features), not just the choice of SVM representation.
+- The non-tottering variant did reduce feature redundancy but in this run produced a degenerate test split containing only normal samples; reported perfect accuracy for that run is therefore not evidence of improved anomaly detection.
 
-Our graphlet-based approach offers advantages over simpler methods:
-- **Structural information:** Captures graph topology, not just aggregate statistics
-- **Adaptability:** Can detect novel attacks with different patterns
-- **Interpretability:** Graphlets show actual communication structures (useful for investigation)
-- **Scalability:** Random walk kernel is more efficient than many alternatives
-
-### 5.2 Practical Recommendations
-
-The choice of method depends on operational constraints:
-
-**For Critical Infrastructure / Research:** The kernel trick method delivers the best empirical performance (92.86% accuracy, zero false positives on our test set). The 2.57 second computation per batch is acceptable if you're analyzing historical data or can batch process overnight logs. This approach is best for high-stakes environments where accuracy is paramount.
-
-**For Production Network Monitoring (Recommended):** Non-tottering random walk strikes the best balance. It achieves identical accuracy to the kernel trick (92.86%) in just 0.25 seconds—fast enough for real-time or batch processing on incoming traffic. The method is simple, interpretable, and requires less memory. This is our recommendation for operational deployment.
-
-**For Embedded/Resource-Constrained Systems:** Standard direct mapping is fastest (0.23s) with acceptable accuracy (85.71%). The trade-off is lower anomaly detection rate (66.67%)—roughly one in three attacks missed. Only suitable if speed is critical and missing some attacks is acceptable.
-
-### 5.3 Future Work
-
-1. **Multi-class classification:** Extend to specific attack types rather than binary classification
-2. **Temporal patterns:** Incorporate time-based features for evolving threat detection
-3. **Graph neural networks:** Use GNNs for automatic feature learning from graphlets
-4. **Interpretability:** Generate explanations for why hosts are flagged as anomalous
-5. **Concept drift:** Handle evolution of normal and anomalous behaviors over time
+Practical takeaway: before deploying this pipeline, fix label consistency and evaluation (use stratified CV), apply class imbalance techniques, and reduce feature dimensionality. After those corrections, re-evaluate using recall and PR-AUC as the primary metrics.
 
 ---
 
-## 6. Conclusion
+## 6. Appendix: Figure captions
 
-Network anomaly detection remains challenging because attacks are rare and often deliberately stealthy. We've shown that encoding host communication patterns as graphlets—capturing not just what hosts communicate, but how—provides a powerful signal for distinguishing normal from anomalous behavior.
+- Figure 1 ![](./output/1.png) Network graphlet visualization of normal host communication patterns.
 
-Our comparison of three methods reveals important practical insights: explicit feature mapping is fast but loses accuracy on rare classes; the kernel trick recovers accuracy but becomes computationally expensive; non-tottering random walks provide an elegant middle ground, achieving kernel-trick-level accuracy at direct-mapping speed. The non-tottering variant works better because it eliminates redundant oscillating walks, producing more meaningful features with less noise.
+- Figure 2 ![](./output/2.png) Network graphlet showing malicious host behavior with limited port connections.
 
-On our dataset, we achieved 92.86% accuracy with 83.33% anomaly detection rate using non-tottering walks in just 0.25 seconds. While no detection method is perfect (our one false negative illustrates), this performance is sufficient for practical security monitoring, especially when combined with other detection techniques.
+- Figure 3 ![](./output/3.png) Confusion matrix demonstrating 94% accuracy for strict classification strategy.
 
-We recommend implementing the non-tottering random walk approach in production environments. It is fast enough for real-time processing, accurate enough to catch most attacks, and interpretable—security analysts can examine the graphlets of flagged hosts to understand why they were suspicious. As a next step, adding temporal features and coupling this method with traditional rule-based detection would create a more robust system.
+- Figure 4 ![](./output/4.png) Direct Mapping achieves similar accuracy to Kernel Trick but with significantly faster computation.
+- Figure 5 ![](./output/5.png) ROC curve showing AUC of 0.500 with error distribution between false positives and negatives.
 
-![Method Comparison Summary](./output/6.png)
-*Figure 6: Comprehensive comparison of all three methods showing accuracy, precision, recall, and computational efficiency.*
+- Figure 6 ![](./output/6.png) Non-Oscillating Walk offers faster computation while Standard Walk achieves perfect accuracy.
+
+---
+
