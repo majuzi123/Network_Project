@@ -177,10 +177,6 @@ The trained model was applied to the unlabeled network traffic trace to discover
 ![Detection Results Distribution](./output/4.png)
 *Figure 4: Distribution of normal vs. anomalous hosts detected in the unlabeled trace. The model identified suspicious behavior in a small percentage of hosts.*
 
-**Detection Results:**
-- **Total hosts analyzed:** [varies based on unlabeled trace]
-- **Hosts detected as anomalous:** [X hosts, Y% of total]
-- **Hosts detected as normal:** [Z hosts, W% of total]
 
 **Top Anomalous Hosts (by confidence score):**
 The SVM decision function provides confidence scores for each prediction. Hosts with the highest confidence scores are most likely to be malicious.
